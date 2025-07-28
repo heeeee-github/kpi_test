@@ -27,6 +27,18 @@ def load_and_process_data():
         }
     )
 
+    # 거래방식 보정
+    df["거래방식보정"] = df["거래방식"].map(
+        {
+            "정가거래": "정가거래",
+            "간편거래": "정가거래",
+            "입찰거래": "입찰거래",
+            "발주거래": "발주거래",
+            "기획전": "기획전",
+            "특화상품": "특화상품",
+        }
+    )
+
     # 판매자세부구분
     def 분류함수(row):
         if (
@@ -382,7 +394,7 @@ def display_item_analysis(df, top_n=None, show_row_total=True, show_col_total=Tr
             "👥 회원",
             "🛍️ 상품 등록(개발필요)",
             "📦 유통 효율(개발필요)",
-            "🔄 거래 다양화(개발필요)",
+            "🔄 거래 다양화",
         ]
     )
 
@@ -569,6 +581,340 @@ def display_item_analysis(df, top_n=None, show_row_total=True, show_col_total=Tr
                 show_col_total=show_col_total,
             )
 
+    with tab_거래다양화분석:
+
+        # 거래다양화를 위한 특별한 집계 함수 호출
+        _display_diversification_section(df, 기준선택)
+
+
+# 거래다양화 분석을 위한 함수
+def _display_diversification_section(df, 기준선택):
+    """거래다양화 분석 - 거래방식별 거래건수를 포함한 집계"""
+
+    if 기준선택 not in df.columns:
+        기준선택 = "year_month"
+
+    # 거래방식 컬럼 확인
+    if "거래방식보정" in df.columns:
+        group_col = "거래방식보정"
+    elif "거래유형보정" in df.columns:
+        group_col = "거래유형보정"
+    elif "거래유형" in df.columns:
+        group_col = "거래유형"
+    else:
+        st.warning("거래방식 관련 컬럼을 찾을 수 없습니다.")
+        return
+
+    # 구매확정금액, 구매확정물량, 거래건수 모두 집계
+    flow = (
+        df.groupby([기준선택, group_col])
+        .agg(
+            {
+                "구매확정금액(원)": "sum",
+                "구매확정물량": "sum",
+                "확정일자": "count",  # 거래건수
+            }
+        )
+        .reset_index()
+    )
+
+    # 컬럼명 변경 및 단위 변환
+    flow["구매확정금액(백만원)"] = flow["구매확정금액(원)"] / 1_000_000
+    flow["구매확정물량(톤)"] = flow["구매확정물량"] / 1_000
+    flow["거래건수"] = flow["확정일자"]
+
+    # year_week인 경우 시간순 정렬
+    if 기준선택 == "year_week":
+        flow = flow.sort_values(기준선택)
+
+    # 거래방식 순서 정렬 (거래금액 기준 내림차순)
+    group_totals = (
+        flow.groupby(group_col)["구매확정금액(백만원)"]
+        .sum()
+        .sort_values(ascending=False)
+    )
+    col_order = group_totals.index.tolist()
+
+    # 카테고리컬 데이터로 변환하여 순서 지정
+    flow[group_col] = pd.Categorical(
+        flow[group_col], categories=col_order, ordered=True
+    )
+
+    # 금액 피벗 테이블
+    pivot_amount = (
+        flow.pivot(index=기준선택, columns=group_col, values="구매확정금액(백만원)")
+        .fillna(0)
+        .astype(float)
+    )
+    pivot_amount = pivot_amount.reindex(columns=col_order)
+
+    # 물량 피벗 테이블
+    pivot_volume = (
+        flow.pivot(index=기준선택, columns=group_col, values="구매확정물량(톤)")
+        .fillna(0)
+        .astype(float)
+    )
+    pivot_volume = pivot_volume.reindex(columns=col_order)
+
+    # 거래건수 피벗 테이블
+    pivot_count = (
+        flow.pivot(index=기준선택, columns=group_col, values="거래건수")
+        .fillna(0)
+        .astype(int)
+    )
+    pivot_count = pivot_count.reindex(columns=col_order)
+
+    # 합계 행 추가
+    total_row_amount = pd.DataFrame(pivot_amount.sum(axis=0)).T
+    total_row_amount.index = ["합계"]
+
+    total_row_volume = pd.DataFrame(pivot_volume.sum(axis=0)).T
+    total_row_volume.index = ["합계"]
+
+    total_row_count = pd.DataFrame(pivot_count.sum(axis=0)).T
+    total_row_count.index = ["합계"]
+
+    # 합계 열 추가
+    pivot_amount["합계"] = pivot_amount.sum(axis=1)
+    pivot_volume["합계"] = pivot_volume.sum(axis=1)
+    pivot_count["합계"] = pivot_count.sum(axis=1)
+
+    total_row_amount["합계"] = total_row_amount.sum(axis=1)
+    total_row_volume["합계"] = total_row_volume.sum(axis=1)
+    total_row_count["합계"] = total_row_count.sum(axis=1)
+
+    # 최종 테이블 생성
+    pivot_amount_with_total = pd.concat([pivot_amount, total_row_amount])
+    pivot_volume_with_total = pd.concat([pivot_volume, total_row_volume])
+    pivot_count_with_total = pd.concat([pivot_count, total_row_count])
+
+    # 컬럼 레이아웃
+    col_table1, col_table2, col_table3 = st.columns([1, 1, 1])
+
+    # 탭으로 금액, 물량, 건수 구분하여 표시
+    with col_table1:
+        tab_amount, tab_volume, tab_count = st.tabs(
+            [" 금액(백만원)", " 물량(톤)", " 건수"]
+        )
+
+        with tab_amount:
+            amount_selection = st.dataframe(
+                pivot_amount_with_total.style.format("{:,.0f}"),
+                use_container_width=True,
+                height=400,
+                on_select="rerun",
+                selection_mode="single-row",
+                key=f"amount_table_trade_type",
+            )
+
+        with tab_volume:
+            volume_selection = st.dataframe(
+                pivot_volume_with_total.style.format("{:,.0f}"),
+                use_container_width=True,
+                height=400,
+                on_select="rerun",
+                selection_mode="single-row",
+                key=f"volume_table_trade_type",
+            )
+
+        with tab_count:
+            count_selection = st.dataframe(
+                pivot_count_with_total.style.format("{:,.0f}"),
+                use_container_width=True,
+                height=400,
+                on_select="rerun",
+                selection_mode="single-row",
+                key=f"count_table_trade_type",
+            )
+
+    with col_table2:
+        # 거래방식별 요약 통계
+        st.markdown("**거래방식별 요약 통계**")
+
+        # 전체 기간 합계
+        summary_stats = (
+            flow.groupby(group_col)
+            .agg(
+                {
+                    "구매확정금액(백만원)": "sum",
+                    "구매확정물량(톤)": "sum",
+                    "거래건수": "sum",
+                }
+            )
+            .reset_index()
+        )
+
+        # 비중 계산
+        total_amount = summary_stats["구매확정금액(백만원)"].sum()
+        total_volume = summary_stats["구매확정물량(톤)"].sum()
+        total_count = summary_stats["거래건수"].sum()
+
+        summary_stats["금액비중(%)"] = (
+            summary_stats["구매확정금액(백만원)"] / total_amount * 100
+        ).round(1)
+        summary_stats["물량비중(%)"] = (
+            summary_stats["구매확정물량(톤)"] / total_volume * 100
+        ).round(1)
+        summary_stats["건수비중(%)"] = (
+            summary_stats["거래건수"] / total_count * 100
+        ).round(1)
+
+        # 정렬 (거래금액 기준 내림차순)
+        summary_stats = summary_stats.sort_values(
+            "구매확정금액(백만원)", ascending=False
+        )
+
+        st.dataframe(
+            summary_stats.style.format(
+                {
+                    "구매확정금액(백만원)": "{:,.0f}",
+                    "구매확정물량(톤)": "{:,.0f}",
+                    "거래건수": "{:,}",
+                    "금액비중(%)": "{:.1f}%",
+                    "물량비중(%)": "{:.1f}%",
+                    "건수비중(%)": "{:.1f}%",
+                }
+            ),
+            use_container_width=True,
+            hide_index=True,
+            height=400,
+        )
+
+    with col_table3:
+        # 그래프 표시
+        st.markdown("**거래방식별 추이**")
+
+        # 그래프 탭
+        tab_amount_chart, tab_volume_chart, tab_count_chart = st.tabs(
+            [" 금액", " 물량", " 건수"]
+        )
+
+        with tab_amount_chart:
+            import plotly.express as px
+
+            # X축 순서 설정
+            if 기준선택 == "year_week":
+                x_order = sorted(flow[기준선택].unique())
+                category_orders = {기준선택: x_order}
+            else:
+                category_orders = None
+
+            fig = px.line(
+                flow,
+                x=기준선택,
+                y="구매확정금액(백만원)",
+                color=group_col,
+                markers=True,
+                title=f"{기준선택}별 거래방식별 거래금액 추이",
+                category_orders=category_orders,
+            )
+            fig.update_layout(height=300)
+            st.plotly_chart(fig, use_container_width=True)
+
+        with tab_volume_chart:
+            fig = px.line(
+                flow,
+                x=기준선택,
+                y="구매확정물량(톤)",
+                color=group_col,
+                markers=True,
+                title=f"{기준선택}별 거래방식별 거래물량 추이",
+                category_orders=category_orders,
+            )
+            fig.update_layout(height=300)
+            st.plotly_chart(fig, use_container_width=True)
+
+        with tab_count_chart:
+            fig = px.line(
+                flow,
+                x=기준선택,
+                y="거래건수",
+                color=group_col,
+                markers=True,
+                title=f"{기준선택}별 거래방식별 거래건수 추이",
+                category_orders=category_orders,
+            )
+            fig.update_layout(height=300)
+            st.plotly_chart(fig, use_container_width=True)
+
+    # 선택된 셀에 대한 거래내역 표시
+    _display_trade_type_transaction_details(
+        df,
+        기준선택,
+        group_col,
+        amount_selection,
+        volume_selection,
+        count_selection,
+        pivot_amount_with_total,
+        pivot_volume_with_total,
+        pivot_count_with_total,
+    )
+
+
+# 거래방식별 선택된 셀의 거래내역을 표시하는 함수
+def _display_trade_type_transaction_details(
+    df,
+    기준선택,
+    group_col,
+    amount_selection,
+    volume_selection,
+    count_selection,
+    pivot_amount_with_total,
+    pivot_volume_with_total,
+    pivot_count_with_total,
+):
+    """선택된 피벗 테이블 행에 해당하는 거래내역을 표시"""
+
+    selected_period = None
+    table_type = None
+
+    # 금액 테이블에서 선택된 행 처리
+    if (
+        amount_selection
+        and "selection" in amount_selection
+        and "rows" in amount_selection["selection"]
+    ):
+        if amount_selection["selection"]["rows"]:
+            selected_row_idx = amount_selection["selection"]["rows"][0]
+            if selected_row_idx < len(pivot_amount_with_total.index):
+                selected_period = pivot_amount_with_total.index[selected_row_idx]
+                table_type = "금액"
+
+    # 물량 테이블에서 선택된 행 처리
+    elif (
+        volume_selection
+        and "selection" in volume_selection
+        and "rows" in volume_selection["selection"]
+    ):
+        if volume_selection["selection"]["rows"]:
+            selected_row_idx = volume_selection["selection"]["rows"][0]
+            if selected_row_idx < len(pivot_volume_with_total.index):
+                selected_period = pivot_volume_with_total.index[selected_row_idx]
+                table_type = "물량"
+
+    # 건수 테이블에서 선택된 행 처리
+    elif (
+        count_selection
+        and "selection" in count_selection
+        and "rows" in count_selection["selection"]
+    ):
+        if count_selection["selection"]["rows"]:
+            selected_row_idx = count_selection["selection"]["rows"][0]
+            if selected_row_idx < len(pivot_count_with_total.index):
+                selected_period = pivot_count_with_total.index[selected_row_idx]
+                table_type = "건수"
+
+    # 선택된 기간이 있고 "합계" 행이 아닌 경우
+    if selected_period and selected_period != "합계":
+        _show_filtered_transactions_by_period(
+            df,
+            기준선택,
+            group_col,
+            selected_period,
+            table_type,
+            pivot_amount_with_total,
+        )
+
 
 # 공통 거래흐름 표/비율/그래프 함수
 def _display_flow_section(
@@ -595,6 +941,11 @@ def _display_flow_section(
 
     flow["구매확정금액(백만원)"] = flow["구매확정금액(원)"] / 1_000_000
     flow["구매확정물량(톤)"] = flow["구매확정물량"] / 1_000  # kg -> 톤 변환
+
+    # year_week인 경우 시간순 정렬을 위한 처리
+    if 기준선택 == "year_week":
+        # year_week 문자열을 기준으로 정렬 (YYYY-WW 형태)
+        flow = flow.sort_values(기준선택)
 
     # 거래금액 기준으로 그룹 내림차순 정렬
     if col_order is None or len(col_order) == 0:
@@ -672,7 +1023,7 @@ def _display_flow_section(
             st.markdown(
                 """
                 <div style="background-color: #FFF8DC; padding: 10px; border-radius: 5px; border: 1px solid #DDD;">
-                    <strong>💡 팁: 표의 행을 클릭하면 해당 거래내역을 아래에서 확인할 수 있습니다</strong>
+                    <strong>💡 팁: 표의 행을 클릭하면 해당 거래내역을 아래에서 확인</strong>
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -691,7 +1042,7 @@ def _display_flow_section(
             st.markdown(
                 """
                 <div style="background-color: #FFF8DC; padding: 10px; border-radius: 5px; border: 1px solid #DDD;">
-                    <strong>💡 팁: 표의 행을 클릭하면 해당 거래내역을 아래에서 확인할 수 있습니다</strong>
+                    <strong>💡 팁: 표의 행을 클릭하면 해당 거래내역을 아래에서 확인</strong>
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -966,52 +1317,140 @@ def _display_flow_section(
         tab_amount_chart, tab_volume_chart = st.tabs([" 금액 그래프", " 물량 그래프"])
 
         with tab_amount_chart:
+            # 그룹별 합계 데이터 생성
+            total_by_period = (
+                flow.groupby(기준선택)["구매확정금액(백만원)"].sum().reset_index()
+            )
+
+            # X축 순서 설정 (year_week인 경우 시간순 정렬)
+            if 기준선택 == "year_week":
+                x_order = sorted(flow[기준선택].unique())
+                category_orders = {기준선택: x_order}
+            else:
+                category_orders = None
+
+            # 누적 막대그래프 생성
             if color_map is None:
-                fig = px.line(
+                fig_bar = px.bar(
                     flow,
                     x=기준선택,
                     y="구매확정금액(백만원)",
                     color=group_col,
-                    markers=True,
                     title=f"{기준선택}별 {group_col}별 거래금액 추이 (단위: 백만원)",
                     labels={"구매확정금액(백만원)": "거래금액(백만원)"},
+                    category_orders=category_orders,
                 )
             else:
-                fig = px.line(
+                fig_bar = px.bar(
                     flow,
                     x=기준선택,
                     y="구매확정금액(백만원)",
                     color=group_col,
-                    markers=True,
                     title=f"{기준선택}별 {group_col}별 거래금액 추이 (단위: 백만원)",
                     labels={"구매확정금액(백만원)": "거래금액(백만원)"},
                     color_discrete_map=color_map,
+                    category_orders=category_orders,
                 )
-            st.plotly_chart(fig, use_container_width=True)
+
+            # 합계 선그래프 추가
+            fig_bar.add_scatter(
+                x=total_by_period[기준선택],
+                y=total_by_period["구매확정금액(백만원)"],
+                mode="lines+markers",
+                name="합계",
+                line=dict(color="red", width=3),
+                marker=dict(size=8, color="red"),
+                yaxis="y",
+            )
+
+            # 레이아웃 업데이트
+            fig_bar.update_layout(
+                showlegend=True,
+                legend=dict(
+                    orientation="h", yanchor="bottom", y=0.95, xanchor="center", x=0.5
+                ),
+                title=dict(y=0.95, x=0.5, xanchor="center"),
+                margin=dict(t=120, b=50, l=50, r=50),
+                xaxis=dict(
+                    categoryorder=(
+                        "category ascending"
+                        if 기준선택 in ["year_week", "year"]
+                        else None
+                    ),
+                    tickangle=45 if 기준선택 == "year_week" else 0,
+                    type="category" if 기준선택 in ["year_week", "year"] else None,
+                ),
+            )
+
+            st.plotly_chart(fig_bar, use_container_width=True)
 
         with tab_volume_chart:
+            # 그룹별 합계 데이터 생성
+            total_by_period = (
+                flow.groupby(기준선택)["구매확정물량(톤)"].sum().reset_index()
+            )
+
+            # X축 순서 설정 (year_week인 경우 시간순 정렬)
+            if 기준선택 == "year_week":
+                x_order = sorted(flow[기준선택].unique())
+                category_orders = {기준선택: x_order}
+            else:
+                category_orders = None
+
+            # 누적 막대그래프 생성
             if color_map is None:
-                fig = px.line(
+                fig_bar = px.bar(
                     flow,
                     x=기준선택,
                     y="구매확정물량(톤)",
                     color=group_col,
-                    markers=True,
                     title=f"{기준선택}별 {group_col}별 거래물량 추이 (단위: 톤)",
                     labels={"구매확정물량(톤)": "거래물량(톤)"},
+                    category_orders=category_orders,
                 )
             else:
-                fig = px.line(
+                fig_bar = px.bar(
                     flow,
                     x=기준선택,
                     y="구매확정물량(톤)",
                     color=group_col,
-                    markers=True,
                     title=f"{기준선택}별 {group_col}별 거래물량 추이 (단위: 톤)",
                     labels={"구매확정물량(톤)": "거래물량(톤)"},
                     color_discrete_map=color_map,
+                    category_orders=category_orders,
                 )
-            st.plotly_chart(fig, use_container_width=True)
+
+            # 합계 선그래프 추가
+            fig_bar.add_scatter(
+                x=total_by_period[기준선택],
+                y=total_by_period["구매확정물량(톤)"],
+                mode="lines+markers",
+                name="합계",
+                line=dict(color="red", width=3),
+                marker=dict(size=8, color="red"),
+                yaxis="y",
+            )
+
+            # 레이아웃 업데이트
+            fig_bar.update_layout(
+                showlegend=True,
+                legend=dict(
+                    orientation="h", yanchor="bottom", y=0.95, xanchor="center", x=0.5
+                ),
+                title=dict(y=0.95, x=0.5, xanchor="center"),
+                margin=dict(t=120, b=50, l=50, r=50),
+                xaxis=dict(
+                    categoryorder=(
+                        "category ascending"
+                        if 기준선택 in ["year_week", "year"]
+                        else None
+                    ),
+                    tickangle=45 if 기준선택 == "year_week" else 0,
+                    type="category" if 기준선택 in ["year_week", "year"] else None,
+                ),
+            )
+
+            st.plotly_chart(fig_bar, use_container_width=True)
 
     # 선택된 셀에 대한 거래내역 표시
     _display_transaction_details(
