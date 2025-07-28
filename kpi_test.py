@@ -499,6 +499,10 @@ def display_item_analysis(df, top_n=None, show_row_total=True, show_col_total=Tr
 
     # 회원분석 탭
     with tab_회원분석:
+        # 신규/기존 회원 및 초도/기존 거래 분석
+        st.markdown("#### 신규/기존 회원 및 거래 분석")
+        _display_member_analysis_section(df, 기준선택)
+
         # 6. 판매자별 거래 흐름 (상위 N개)
         st.markdown("#### 판매자별")
         if top_n is None:
@@ -585,6 +589,345 @@ def display_item_analysis(df, top_n=None, show_row_total=True, show_col_total=Tr
 
         # 거래다양화를 위한 특별한 집계 함수 호출
         _display_diversification_section(df, 기준선택)
+
+
+# 회원분석 함수
+def _display_member_analysis_section(df, 기준선택):
+    """회원분석 - 신규/기존 회원 및 초도/기존 거래 분류"""
+
+    if 기준선택 not in df.columns:
+        기준선택 = "year_month"
+
+    # 필요한 컬럼 확인
+    required_cols = ["확정일자", "판매자가입일", "구매자가입일", "판매자", "구매자"]
+    missing_cols = [col for col in required_cols if col not in df.columns]
+
+    if missing_cols:
+        st.warning(
+            f"다음 컬럼이 누락되어 회원분석을 수행할 수 없습니다: {missing_cols}"
+        )
+        return
+
+    # 데이터 전처리
+    analysis_df = df.copy()
+
+    # 날짜 컬럼이 datetime이 아닌 경우 변환
+    for date_col in ["확정일자", "판매자가입일", "구매자가입일"]:
+        if date_col in analysis_df.columns:
+            analysis_df[date_col] = pd.to_datetime(
+                analysis_df[date_col], errors="coerce"
+            )
+
+    # 기준선택에 따른 날짜 그룹핑
+    if 기준선택 == "year":
+        analysis_df["거래기준기간"] = analysis_df["확정일자"].dt.year
+        analysis_df["판매자가입기준기간"] = analysis_df["판매자가입일"].dt.year
+        analysis_df["구매자가입기준기간"] = analysis_df["구매자가입일"].dt.year
+    elif 기준선택 == "year_quarter":
+        analysis_df["거래기준기간"] = (
+            analysis_df["확정일자"].dt.year.astype(str)
+            + "-Q"
+            + analysis_df["확정일자"].dt.quarter.astype(str)
+        )
+        analysis_df["판매자가입기준기간"] = (
+            analysis_df["판매자가입일"].dt.year.astype(str)
+            + "-Q"
+            + analysis_df["판매자가입일"].dt.quarter.astype(str)
+        )
+        analysis_df["구매자가입기준기간"] = (
+            analysis_df["구매자가입일"].dt.year.astype(str)
+            + "-Q"
+            + analysis_df["구매자가입일"].dt.quarter.astype(str)
+        )
+    elif 기준선택 == "year_month":
+        analysis_df["거래기준기간"] = analysis_df["확정일자"].dt.strftime("%Y-%m")
+        analysis_df["판매자가입기준기간"] = analysis_df["판매자가입일"].dt.strftime(
+            "%Y-%m"
+        )
+        analysis_df["구매자가입기준기간"] = analysis_df["구매자가입일"].dt.strftime(
+            "%Y-%m"
+        )
+    elif 기준선택 == "year_week":
+        analysis_df["거래기준기간"] = analysis_df["확정일자"].dt.strftime("%Y-%V")
+        analysis_df["판매자가입기준기간"] = analysis_df["판매자가입일"].dt.strftime(
+            "%Y-%V"
+        )
+        analysis_df["구매자가입기준기간"] = analysis_df["구매자가입일"].dt.strftime(
+            "%Y-%V"
+        )
+
+    # 신규/기존 회원 분류
+    analysis_df["판매자회원구분"] = analysis_df.apply(
+        lambda row: (
+            "신규회원"
+            if row["거래기준기간"] == row["판매자가입기준기간"]
+            else "기존회원"
+        ),
+        axis=1,
+    )
+    analysis_df["구매자회원구분"] = analysis_df.apply(
+        lambda row: (
+            "신규회원"
+            if row["거래기준기간"] == row["구매자가입기준기간"]
+            else "기존회원"
+        ),
+        axis=1,
+    )
+
+    # 초도/기존 거래 분류 (각 회원의 첫 거래인지 확인)
+    # 판매자의 첫 거래 확인
+    seller_first_trade = analysis_df.groupby("판매자")["확정일자"].min().to_dict()
+    analysis_df["판매자초도거래여부"] = analysis_df.apply(
+        lambda row: (
+            "초도거래"
+            if row["확정일자"] == seller_first_trade.get(row["판매자"])
+            else "기존거래"
+        ),
+        axis=1,
+    )
+
+    # 구매자의 첫 거래 확인
+    buyer_first_trade = analysis_df.groupby("구매자")["확정일자"].min().to_dict()
+    analysis_df["구매자초도거래여부"] = analysis_df.apply(
+        lambda row: (
+            "초도거래"
+            if row["확정일자"] == buyer_first_trade.get(row["구매자"])
+            else "기존거래"
+        ),
+        axis=1,
+    )
+
+    # 탭으로 분석 결과 표시
+    tab_seller_analysis, tab_buyer_analysis, tab_combined_analysis = st.tabs(
+        ["🏪 판매자", "🛒 구매자 ", "📊 통합 "]
+    )
+
+    with tab_seller_analysis:
+        st.subheader("판매자 신규/기존 회원 및 초도/기존 거래")
+
+        # 판매자 분석 테이블
+        seller_analysis = (
+            analysis_df.groupby([기준선택, "판매자회원구분", "판매자초도거래여부"])
+            .agg(
+                {"구매확정금액(원)": "sum", "구매확정물량": "sum", "판매자": "nunique"}
+            )
+            .reset_index()
+        )
+
+        seller_analysis.columns = [
+            기준선택,
+            "회원구분",
+            "거래구분",
+            "거래금액",
+            "거래물량",
+            "판매자수",
+        ]
+
+        # 피벗 테이블로 변환
+        seller_pivot_amount = seller_analysis.pivot_table(
+            index=기준선택,
+            columns=["회원구분", "거래구분"],
+            values="거래금액",
+            fill_value=0,
+        )
+
+        seller_pivot_count = seller_analysis.pivot_table(
+            index=기준선택,
+            columns=["회원구분", "거래구분"],
+            values="판매자수",
+            fill_value=0,
+        )
+
+        # 표시
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.markdown("**판매자 거래금액 (백만원)**")
+            seller_pivot_amount_display = seller_pivot_amount / 1_000_000
+            st.dataframe(
+                seller_pivot_amount_display.style.format("{:,.0f}"),
+                use_container_width=True,
+            )
+
+        with col2:
+            st.markdown("**판매자 수**")
+            st.dataframe(
+                seller_pivot_count.style.format("{:,0f}"), use_container_width=True
+            )
+
+    with tab_buyer_analysis:
+        st.subheader("구매자 신규/기존 회원 및 초도/기존 거래 분석")
+
+        # 구매자 분석 테이블
+        buyer_analysis = (
+            analysis_df.groupby([기준선택, "구매자회원구분", "구매자초도거래여부"])
+            .agg(
+                {"구매확정금액(원)": "sum", "구매확정물량": "sum", "구매자": "nunique"}
+            )
+            .reset_index()
+        )
+
+        buyer_analysis.columns = [
+            기준선택,
+            "회원구분",
+            "거래구분",
+            "거래금액",
+            "거래물량",
+            "구매자수",
+        ]
+
+        # 피벗 테이블로 변환
+        buyer_pivot_amount = buyer_analysis.pivot_table(
+            index=기준선택,
+            columns=["회원구분", "거래구분"],
+            values="거래금액",
+            fill_value=0,
+        )
+
+        buyer_pivot_count = buyer_analysis.pivot_table(
+            index=기준선택,
+            columns=["회원구분", "거래구분"],
+            values="구매자수",
+            fill_value=0,
+        )
+
+        # 표시
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.markdown("**구매자 거래금액 (백만원)**")
+            buyer_pivot_amount_display = buyer_pivot_amount / 1_000_000
+            st.dataframe(
+                buyer_pivot_amount_display.style.format("{:,.0f}"),
+                use_container_width=True,
+            )
+
+        with col2:
+            st.markdown("**구매자 수**")
+            st.dataframe(
+                buyer_pivot_count.style.format("{:,0f}"), use_container_width=True
+            )
+
+    with tab_combined_analysis:
+        st.subheader("통합")
+
+        # 통합 분석 - 신규회원/기존회원 별 초도거래/기존거래 비율
+        combined_stats = []
+
+        # 각 기간별 통계
+        for period in sorted(analysis_df[기준선택].unique()):
+            period_data = analysis_df[analysis_df[기준선택] == period]
+
+            # 판매자 통계
+            seller_stats = (
+                period_data.groupby(["판매자회원구분", "판매자초도거래여부"])
+                .agg({"구매확정금액(원)": "sum", "판매자": "nunique"})
+                .reset_index()
+            )
+            seller_stats["구분"] = "판매자"
+            seller_stats = seller_stats.rename(
+                columns={
+                    "판매자회원구분": "회원구분",
+                    "판매자초도거래여부": "거래구분",
+                    "판매자": "회원수",
+                }
+            )
+
+            # 구매자 통계
+            buyer_stats = (
+                period_data.groupby(["구매자회원구분", "구매자초도거래여부"])
+                .agg({"구매확정금액(원)": "sum", "구매자": "nunique"})
+                .reset_index()
+            )
+            buyer_stats["구분"] = "구매자"
+            buyer_stats = buyer_stats.rename(
+                columns={
+                    "구매자회원구분": "회원구분",
+                    "구매자초도거래여부": "거래구분",
+                    "구매자": "회원수",
+                }
+            )
+
+            # 기간 정보 추가
+            seller_stats[기준선택] = period
+            buyer_stats[기준선택] = period
+
+            combined_stats.extend([seller_stats, buyer_stats])
+
+        if combined_stats:
+            combined_df = pd.concat(combined_stats, ignore_index=True)
+
+            # 요약 테이블 생성
+            summary_table = (
+                combined_df.groupby([기준선택, "구분", "회원구분", "거래구분"])
+                .agg({"구매확정금액(원)": "sum", "회원수": "sum"})
+                .reset_index()
+            )
+
+            # 피벗 테이블로 변환
+            summary_pivot = summary_table.pivot_table(
+                index=[기준선택, "구분"],
+                columns=["회원구분", "거래구분"],
+                values="구매확정금액(원)",
+                fill_value=0,
+            )
+
+            st.markdown("**통합 거래금액 분석 (백만원)**")
+            summary_pivot_display = summary_pivot / 1_000_000
+            st.dataframe(
+                summary_pivot_display.style.format("{:,.0f}"),
+                use_container_width=True,
+                height=400,
+            )
+
+            # 비율 분석
+            st.markdown("**신규회원 비율 (%)**")
+
+            # 각 기간별 신규회원 비율 계산
+            ratio_data = []
+            for period in sorted(analysis_df[기준선택].unique()):
+                period_data = analysis_df[analysis_df[기준선택] == period]
+
+                # 판매자 신규회원 비율
+                seller_total = period_data["판매자"].nunique()
+                seller_new = period_data[period_data["판매자회원구분"] == "신규회원"][
+                    "판매자"
+                ].nunique()
+                seller_new_ratio = (
+                    (seller_new / seller_total * 100) if seller_total > 0 else 0
+                )
+
+                # 구매자 신규회원 비율
+                buyer_total = period_data["구매자"].nunique()
+                buyer_new = period_data[period_data["구매자회원구분"] == "신규회원"][
+                    "구매자"
+                ].nunique()
+                buyer_new_ratio = (
+                    (buyer_new / buyer_total * 100) if buyer_total > 0 else 0
+                )
+
+                ratio_data.append(
+                    {
+                        기준선택: period,
+                        "판매자_신규회원_비율(%)": seller_new_ratio,
+                        "구매자_신규회원_비율(%)": buyer_new_ratio,
+                        "판매자_총수": seller_total,
+                        "구매자_총수": buyer_total,
+                    }
+                )
+
+            ratio_df = pd.DataFrame(ratio_data)
+            st.dataframe(
+                ratio_df.style.format(
+                    {
+                        "판매자_신규회원_비율(%)": "{:.1f}%",
+                        "구매자_신규회원_비율(%)": "{:.1f}%",
+                        "판매자_총수": "{:,}",
+                        "구매자_총수": "{:,}",
+                    }
+                ),
+                use_container_width=True,
+            )
 
 
 # 거래다양화 분석을 위한 함수
